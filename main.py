@@ -195,6 +195,10 @@ def process_youtube(entry):
         )
         md = get_gemini_client().summarize_audio(mp3_path.read_bytes(), prompt)
 
+    if md is None:
+        print(f"   - SKIP Gemini で本文なし {entry.title}")
+        return
+
     author = sanitize_filename(getattr(entry, "author", "unknown"), 40)
     fname = f"{entry.pub_dash}_{sanitize_filename(entry.title)}_{author}.md"
     (OUT_YT / fname).write_text(md, encoding="utf-8")
@@ -215,6 +219,10 @@ def process_podcast(entry):
         mp3_path = pathlib.Path(tmpdir) / "podcast.mp3"
         fetch_enclosure(entry, mp3_path)  # ← ここで進捗バーを表示
         md = get_gemini_client().summarize_audio(mp3_path.read_bytes(), prompt)
+
+    if md is None:
+        print(f"   - SKIP Gemini で本文なし {entry.title}")
+        return
 
     author = sanitize_filename(
         getattr(entry, "author", getattr(entry, "itunes_author", "unknown")), 40

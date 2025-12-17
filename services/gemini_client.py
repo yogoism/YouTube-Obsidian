@@ -37,8 +37,11 @@ class GeminiClient:
         self.debug = debug
         self._notify = notifier or (lambda _msg: None)
 
-    def summarize_audio(self, mp3_bytes: bytes, prompt: str) -> str:
-        """音声バイト列を Gemini へ投げ、要約テキストを返す"""
+    def summarize_audio(self, mp3_bytes: bytes, prompt: str) -> str | None:
+        """音声バイト列を Gemini へ投げ、要約テキストを返す。
+
+        parts が欠落するケース（安全フィルタ等）では None を返し、呼び出し側でスキップ可にする。
+        """
         parts = self._build_parts(mp3_bytes)
         payload = {"contents": [{"role": "user", "parts": parts + [{"text": prompt}]}]}
 
@@ -46,7 +49,7 @@ class GeminiClient:
             res = self.session.post(
                 self.gen_url, params={"key": self.api_key}, json=payload, timeout=300
             )
-            if self.debug and res.status_code != 200:
+            if self.debug:
                 print(f"[Gemini debug] status={res.status_code} body={res.text[:300]}")
             if res.status_code in (429, 503):
                 wait = (2**retry) + random.uniform(0, 3)
@@ -54,9 +57,30 @@ class GeminiClient:
                 time.sleep(wait)
                 continue
             res.raise_for_status()
-            return res.json()["candidates"][0]["content"]["parts"][0]["text"]
+            data = res.json()
+            text = self._extract_text(data)
+            if text is None:
+                self._notify("Gemini 応答に本文がありませんでした (parts missing)")
+            return text
 
         raise RuntimeError("Gemini API failed after 5 retries")
+
+    def _extract_text(self, data: dict[str, Any]) -> str | None:
+        """候補からテキストを安全に取り出す。欠落時は None。"""
+        try:
+            candidates = data.get("candidates") or []
+            if not candidates:
+                return None
+            content = candidates[0].get("content") or {}
+            parts = content.get("parts") or []
+            if not parts or not isinstance(parts, list):
+                return None
+            first = parts[0]
+            if not isinstance(first, dict):
+                return None
+            return first.get("text")
+        except Exception:
+            return None
 
     def _build_parts(self, mp3_bytes: bytes) -> list[dict[str, dict[str, str]]]:
         if len(mp3_bytes) > 20 * 1024 * 1024:

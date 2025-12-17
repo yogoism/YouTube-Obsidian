@@ -104,3 +104,40 @@ def test_missing_api_key_raises():
 
     with pytest.raises(ValueError):
         GeminiClient(api_key="", model="m")
+
+
+def test_missing_parts_returns_none_and_notifies(monkeypatch):
+    from services.gemini_client import GeminiClient
+
+    notified = {}
+
+    def fake_post(url, params=None, json=None, **kwargs):
+        return make_response(
+            200,
+            json_data={
+                "candidates": [
+                    {
+                        "finishReason": "SAFETY",
+                        "safetyRatings": [],
+                        "content": {"role": "model"},
+                    }
+                ],
+                "promptFeedback": {"blockReason": "SAFETY"},
+            },
+        )
+
+    def fake_notify(msg):
+        notified["msg"] = msg
+
+    client = GeminiClient(
+        api_key="k",
+        model="m",
+        session=types.SimpleNamespace(post=fake_post),
+        notifier=fake_notify,
+    )
+
+    with monkeypatch.context() as m:
+        m.setattr("time.sleep", lambda s: None)
+        assert client.summarize_audio(b"123", "prompt") is None
+
+    assert "Gemini" in notified["msg"]

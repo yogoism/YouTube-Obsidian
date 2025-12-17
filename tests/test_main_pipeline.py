@@ -150,6 +150,85 @@ def test_process_podcast_writes_markdown(monkeypatch, tmp_path):
     assert out_files[0].read_text(encoding="utf-8") == "result-pod"
 
 
+def test_process_youtube_skips_when_no_summary(monkeypatch, tmp_path):
+    import importlib
+
+    monkeypatch.setenv("OUTPUT_DIR_YT", str(tmp_path / "yt"))
+    monkeypatch.setenv("OUTPUT_DIR_POD", str(tmp_path / "pod"))
+
+    import main
+
+    main = importlib.reload(main)
+
+    monkeypatch.setattr(main, "yt_meta", lambda url: {"duration": 120})
+    monkeypatch.setattr(main, "notify", lambda *_a, **_k: None)
+
+    def fake_run(args, check, timeout):
+        out_path = pathlib.Path(args[5])
+        out_path.write_bytes(b"mp3data")
+
+    monkeypatch.setattr(main.subprocess, "run", fake_run)
+
+    class DummyClient:
+        def summarize_audio(self, _b, _p):
+            return None
+
+    monkeypatch.setattr(main, "get_gemini_client", lambda: DummyClient())
+
+    entry = SimpleNamespace(
+        yt_videoid="vid123",
+        title="Test Video",
+        pub_dash="2025-12-17",
+        pub_slash="2025/12/17",
+        author="Author",
+        link="https://youtu.be/vid123",
+    )
+
+    main.process_youtube(entry)
+
+    out_files = list((tmp_path / "yt").glob("*.md"))
+    assert out_files == []
+
+
+def test_process_podcast_skips_when_no_summary(monkeypatch, tmp_path):
+    import importlib
+
+    monkeypatch.setenv("OUTPUT_DIR_YT", str(tmp_path / "yt"))
+    monkeypatch.setenv("OUTPUT_DIR_POD", str(tmp_path / "pod"))
+
+    import main
+
+    main = importlib.reload(main)
+
+    monkeypatch.setattr(main, "notify", lambda *_a, **_k: None)
+
+    class DummyResp:
+        def __init__(self):
+            self.content = b"mp3bytes"
+
+        def raise_for_status(self): ...
+
+    monkeypatch.setattr(main.requests, "get", lambda url, timeout: DummyResp())
+
+    class DummyClient:
+        def summarize_audio(self, _b, _p):
+            return None
+
+    monkeypatch.setattr(main, "get_gemini_client", lambda: DummyClient())
+
+    entry = SimpleNamespace(
+        title="Podcast Ep",
+        pub_dash="2025-12-17",
+        pub_slash="2025/12/17",
+        author="Host",
+        links=[{"rel": "enclosure", "href": "http://example.com/audio.mp3"}],
+    )
+
+    main.process_podcast(entry)
+    out_files = list((tmp_path / "pod").glob("*.md"))
+    assert out_files == []
+
+
 def test_fetch_enclosure_uses_config_timeout(monkeypatch, tmp_path):
     import importlib
 
