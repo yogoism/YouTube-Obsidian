@@ -10,7 +10,10 @@ from datetime import datetime, timezone, UTC
 from dotenv import load_dotenv
 
 # ---------- 設定 ----------
-load_dotenv()
+# .env.local を優先的に読む（存在しない場合のみデフォルトの .env を読む）
+env_path = pathlib.Path(".env.local")
+load_dotenv(dotenv_path=env_path if env_path.exists() else None)
+
 OUT_YT = pathlib.Path(os.getenv("OUTPUT_DIR_YT", "/Users/shee/YOGO/20_library/youtube"))
 OUT_POD = pathlib.Path(
     os.getenv("OUTPUT_DIR_POD", "/Users/shee/YOGO/20_library/podcast")
@@ -19,12 +22,14 @@ for p in (OUT_YT, OUT_POD):
     p.expanduser().mkdir(parents=True, exist_ok=True)
 
 API_KEY = os.getenv("GEMINI_API_KEY")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEN_URL = (
     "https://generativelanguage.googleapis.com/v1beta/"
-    "models/gemini-2.0-flash:generateContent"
+    f"models/{MODEL}:generateContent"
 )
 UPLOAD_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files"
 WINDOW_HOURS = 24  # 直近何時間を見るか
+DEBUG_GEMINI = os.getenv("GEMINI_DEBUG", "0") == "1"  # デバッグ時のみ詳細を出す
 
 # ---------- 通知 ----------
 try:
@@ -63,7 +68,7 @@ def sanitize_filename(text: str, max_len: int = 80) -> str:
 PROMPT_TMPL = (
     """
     あなたは優秀な日英バイリンガル編集者です。以下の指示に従い、コンテンツの文字起こし全文を処理してください。
-    **出力は日本語・Markdown形式、総文字数は必ず4000字以内**に収めてください。コードブロックは禁止です。
+    **出力は日本語・Markdown形式、総文字数は必ず3000字以内**に収めてください。コードブロックは禁止です。
 
     =====================
     ### メタデータ
@@ -82,14 +87,14 @@ PROMPT_TMPL = (
 
 
     ### 1. 要約 (1000字以内, です/ます調)
-    - まず **動画/音声全体を俯瞰した3文のリード文**
+    - まず **動画/音声全体を俯瞰した5文のリード文**
     - 次に **キーテーマ** を箇条書き (最大6項目)
     - それぞれのテーマに対応する **主要ポイント** を番号付きリストで記載 (1行70文字以内)
     - 具体的数字・固有名詞を残し、冗長・重複表現は削除
     - 句読点と接続詞を適切に挿入して読みやすく
 
     ---
-    ### 2. ポイント (3000字以内, です/ます調)
+    ### 2. ポイント (2000字以内, です/ます調)
     - 文字起こし全文を、**冗長な相づち・脱線・繰り返し** を省きながら時系列で翻訳
     - 重要な見出しごとに `####` の小見出しを付け、続けて本文
     - 見出しは`見出し：/n本文`の形式で必ず記載
@@ -104,7 +109,7 @@ PROMPT_TMPL = (
 
     =====================
     ### 出力ルールまとめ
-    - 全体で**最大4000字**
+    - 全体で**最大3000字**
     - 見出しには `#` をタグとして使わず、必ず `###` から始める
     - 「です/ます」調を徹底
     - 余計な挿入語・口癖・同義反復は削除
@@ -169,6 +174,8 @@ def gemini_audio(mp3_bytes: bytes, prompt: str) -> str:
 
     for retry in range(5):
         res = requests.post(GEN_URL, params={"key": API_KEY}, json=payload, timeout=300)
+        if DEBUG_GEMINI and res.status_code != 200:
+            print(f"[Gemini debug] status={res.status_code} body={res.text[:300]}")
         if res.status_code in (429, 503):
             wait = (2**retry) + random.uniform(0, 3)
             notify(f"Gemini {res.status_code} → {wait:.1f}s wait")
@@ -203,7 +210,7 @@ def yt_meta(url: str) -> dict | None:
 
 
 def yt_is_video(meta: dict) -> bool:
-    """Shorts、ライブ配信、プレミア公開前動画を除外"""
+    """Shorts、ライブ配信、プレミア、公開前動画を除外"""
     dur, w, h = meta.get("duration", 0), meta.get("width", 0), meta.get("height", 0)
     shorts = dur <= 60 or (h and w and h > w)
     stream = (

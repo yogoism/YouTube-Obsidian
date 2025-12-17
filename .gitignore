@@ -136,6 +136,10 @@ ENV/
 env.bak/
 venv.bak/
 
+# ローカル専用の環境変数ファイル（コミット禁止）
+.env.local
+*.env.local
+
 # Spyder project settings
 .spyderproject
 .spyproject
