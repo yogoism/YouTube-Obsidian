@@ -1,35 +1,31 @@
 #!/usr/bin/env python3
-"""
-YouTube RSS → Gemini 2.0 Flash → Markdown
-Asia/Tokyoで毎日 0:00 に実行し、WINDOW_HOURS 内の新着のみ処理
-"""
+"""YouTube RSS → Gemini 2.5 Flash → Markdown."""
 
-import os, re, json, base64, time, pathlib, subprocess, tempfile, random, calendar
+import os, re, json, time, pathlib, subprocess, tempfile, calendar
 import feedparser, requests, yaml
 from datetime import datetime, timezone, UTC
 from dotenv import load_dotenv
+from services.gemini_client import GeminiClient
+from prompts import PROMPT_TMPL
 
 # ---------- 設定 ----------
 # .env.local を優先的に読む（存在しない場合のみデフォルトの .env を読む）
 env_path = pathlib.Path(".env.local")
 load_dotenv(dotenv_path=env_path if env_path.exists() else None)
-
 OUT_YT = pathlib.Path(os.getenv("OUTPUT_DIR_YT", "/Users/shee/YOGO/20_library/youtube"))
 OUT_POD = pathlib.Path(
     os.getenv("OUTPUT_DIR_POD", "/Users/shee/YOGO/20_library/podcast")
 )
 for p in (OUT_YT, OUT_POD):
     p.expanduser().mkdir(parents=True, exist_ok=True)
-
 API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-GEN_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/"
-    f"models/{MODEL}:generateContent"
-)
-UPLOAD_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files"
 WINDOW_HOURS = 24  # 直近何時間を見るか
 DEBUG_GEMINI = os.getenv("GEMINI_DEBUG", "0") == "1"  # デバッグ時のみ詳細を出す
+YTDLP_TIMEOUT = int(os.getenv("YTDLP_TIMEOUT", "900"))  # ハング防止のための上限秒数
+POD_TIMEOUT = int(os.getenv("POD_TIMEOUT", "600"))  # Podcastダウンロードのタイムアウト
+POD_RETRIES = int(os.getenv("POD_RETRIES", "3"))  # Podcastダウンロードのリトライ回数
+_gemini_client: GeminiClient | None = None
 
 # ---------- 通知 ----------
 try:
@@ -58,65 +54,21 @@ def notify(msg: str, title: str = "YouTube & Podcast Bot") -> None:
         print(f"[NOTIFY] {title}: {msg}")
 
 
+def get_gemini_client() -> GeminiClient:
+    """GeminiClient を遅延初期化（notify を参照可能な順序にする）"""
+    global _gemini_client
+    if _gemini_client is None:
+        _gemini_client = GeminiClient(
+            API_KEY, MODEL, debug=DEBUG_GEMINI, notifier=notify
+        )
+    return _gemini_client
+
+
 # ========== ユーティリティ ==========
 def sanitize_filename(text: str, max_len: int = 80) -> str:
     """ファイル名に使えない文字を削除 & 長さ制限"""
     return re.sub(r'[\\/*?:"<>|]', "", text)[:max_len]
 
-
-# ---------- Gemini プロンプト ----------
-PROMPT_TMPL = (
-    """
-    あなたは優秀な日英バイリンガル編集者です。以下の指示に従い、コンテンツの文字起こし全文を処理してください。
-    **出力は日本語・Markdown形式、総文字数は必ず3000字以内**に収めてください。コードブロックは禁止です。
-
-    =====================
-    ### メタデータ
-
-    ---
-    ### YAMLメタデータ
-    必ず最初に YAML フロントマターを挿入してください（開始行と終了行を --- で囲む）。
-    実際に取り込んだ動画/音声のデータを以下の形式で記載してください。
-    含めるキー:
-    - title: {title_ja}
-    - original_title: {original_title}
-    - channel: {channel}
-    - url: {url}
-    - published: {published}
-    ---
-
-
-    ### 1. 要約 (1000字以内, です/ます調)
-    - まず **動画/音声全体を俯瞰した5文のリード文**
-    - 次に **キーテーマ** を箇条書き (最大6項目)
-    - それぞれのテーマに対応する **主要ポイント** を番号付きリストで記載 (1行70文字以内)
-    - 具体的数字・固有名詞を残し、冗長・重複表現は削除
-    - 句読点と接続詞を適切に挿入して読みやすく
-
-    ---
-    ### 2. ポイント (2000字以内, です/ます調)
-    - 文字起こし全文を、**冗長な相づち・脱線・繰り返し** を省きながら時系列で翻訳
-    - 重要な見出しごとに `####` の小見出しを付け、続けて本文
-    - 見出しは`見出し：/n本文`の形式で必ず記載
-    - 質問と回答など会話形式は「**Q:**」「**A:**」を用い、読み手が流れを追いやすいように整理
-    - 引用・例示・数字・固有名詞は正確に保持
-
-    ---
-    ### 3. 次の提案 (任意, 見つかった場合のみ)
-    - 引用記事・文献・論文やツールがあれば紹介、提案されていれば箇条書きで列挙
-    - 1行150字以内
-    - 必ず提案先の論文や記事などのURLを含めること
-
-    =====================
-    ### 出力ルールまとめ
-    - 全体で**最大3000字**
-    - 見出しには `#` をタグとして使わず、必ず `###` から始める
-    - 「です/ます」調を徹底
-    - 余計な挿入語・口癖・同義反復は削除
-    - 指示やコメントは出力しない
-    - 指定以外のセクションを追加しない
-    """
-).lstrip()
 
 
 def build_prompt(entry, *, channel: str = "") -> str:
@@ -143,48 +95,6 @@ def build_prompt(entry, *, channel: str = "") -> str:
         "published": entry.pub_slash,
     }
     return PROMPT_TMPL.format(**meta)
-
-
-# ========== Gemini 呼び出し ==========
-def gemini_audio(mp3_bytes: bytes, prompt: str) -> str:
-    """音声バイト列とプロンプトを渡し、Gemini Flash で要約を得る"""
-    if len(mp3_bytes) > 20 * 1024 * 1024:  # 20MB 超は Files API
-        up = requests.post(
-            UPLOAD_URL,
-            params={"key": API_KEY, "uploadType": "media"},
-            headers={"Content-Type": "audio/mp3"},
-            data=mp3_bytes,
-            timeout=300,
-        )
-        up.raise_for_status()
-        file_uri = up.json()["file"]["uri"]
-        parts = [{"file_data": {"file_uri": file_uri}}, {"text": prompt}]
-    else:
-        parts = [
-            {
-                "inline_data": {
-                    "mime_type": "audio/mp3",
-                    "data": base64.b64encode(mp3_bytes).decode(),
-                }
-            },
-            {"text": prompt},
-        ]
-
-    payload = {"contents": [{"role": "user", "parts": parts}]}
-
-    for retry in range(5):
-        res = requests.post(GEN_URL, params={"key": API_KEY}, json=payload, timeout=300)
-        if DEBUG_GEMINI and res.status_code != 200:
-            print(f"[Gemini debug] status={res.status_code} body={res.text[:300]}")
-        if res.status_code in (429, 503):
-            wait = (2**retry) + random.uniform(0, 3)
-            notify(f"Gemini {res.status_code} → {wait:.1f}s wait")
-            time.sleep(wait)
-            continue
-        res.raise_for_status()
-        return res.json()["candidates"][0]["content"]["parts"][0]["text"]
-
-    raise RuntimeError("Gemini API failed after 5 retries")
 
 
 # ========== YouTube 用 ==========
@@ -236,10 +146,29 @@ def is_podcast(entry) -> bool:
 
 
 def fetch_enclosure(entry, dest: pathlib.Path):
-    enc = next(l for l in entry.links if l.get("rel") == "enclosure")
-    r = requests.get(enc.href, timeout=600)  # 大きいファイルもあるので長めタイムアウト
-    r.raise_for_status()
-    dest.write_bytes(r.content)
+    def _rel(it):
+        return it.get("rel") if isinstance(it, dict) else getattr(it, "rel", None)
+
+    def _href(it):
+        return it.get("href") if isinstance(it, dict) else getattr(it, "href", None)
+
+    enc = next(l for l in entry.links if _rel(l) == "enclosure")
+    href = _href(enc)
+
+    last_err = None
+    for attempt in range(1, POD_RETRIES + 1):
+        try:
+            r = requests.get(href, timeout=POD_TIMEOUT)  # 大きいファイルもあるので長めタイムアウト
+            r.raise_for_status()
+            dest.write_bytes(r.content)
+            return
+        except requests.exceptions.RequestException as e:
+            last_err = e
+            if attempt >= POD_RETRIES:
+                break
+            wait = 2 ** (attempt - 1)
+            time.sleep(wait)
+    raise last_err
 
 
 # ========== 処理ルーチン ==========
@@ -262,8 +191,9 @@ def process_youtube(entry):
         subprocess.run(
             ["yt-dlp", "-x", "--audio-format", "mp3", "-o", str(mp3_path), url],
             check=True,
+            timeout=YTDLP_TIMEOUT,
         )
-        md = gemini_audio(mp3_path.read_bytes(), prompt)
+        md = get_gemini_client().summarize_audio(mp3_path.read_bytes(), prompt)
 
     author = sanitize_filename(getattr(entry, "author", "unknown"), 40)
     fname = f"{entry.pub_dash}_{sanitize_filename(entry.title)}_{author}.md"
@@ -284,7 +214,7 @@ def process_podcast(entry):
     with tempfile.TemporaryDirectory() as tmpdir:
         mp3_path = pathlib.Path(tmpdir) / "podcast.mp3"
         fetch_enclosure(entry, mp3_path)  # ← ここで進捗バーを表示
-        md = gemini_audio(mp3_path.read_bytes(), prompt)
+        md = get_gemini_client().summarize_audio(mp3_path.read_bytes(), prompt)
 
     author = sanitize_filename(
         getattr(entry, "author", getattr(entry, "itunes_author", "unknown")), 40
