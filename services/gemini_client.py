@@ -21,6 +21,10 @@ _BASE_GENERATION_CONFIG: dict[str, Any] = {
     "topP": 0.95,
     "topK": 40,
     "maxOutputTokens": 8192,
+}
+
+# lite 系モデル非対応パラメータ
+_PENALTY_CONFIG: dict[str, Any] = {
     "frequencyPenalty": 0.3,
     "presencePenalty": 0.1,
 }
@@ -55,6 +59,7 @@ class GeminiClient:
         self.gen_url = gen_url or f"{base}/v1beta/models/{model}:generateContent"
         self.debug = debug
         self._notify = notifier or (lambda _msg: None)
+        self._supports_penalty = "lite" not in model
 
     def summarize_audio(self, mp3_bytes: bytes, prompt: str) -> str | None:
         """音声バイト列を Gemini へ投げ、要約テキストを返す。
@@ -68,6 +73,8 @@ class GeminiClient:
         for attempt in range(_MAX_CONTENT_RETRIES):
             temperature = min(_BASE_TEMPERATURE + attempt * _TEMPERATURE_STEP, 2.0)
             gen_config = {**_BASE_GENERATION_CONFIG, "temperature": temperature}
+            if self._supports_penalty:
+                gen_config.update(_PENALTY_CONFIG)
             payload = {"contents": contents, "generationConfig": gen_config}
 
             text, finish_reason = self._request(payload)

@@ -191,6 +191,60 @@ class TestGenerationConfig:
         cfg = captured["payload"]["generationConfig"]
         assert cfg["frequencyPenalty"] > 0, "frequencyPenalty は正の値であるべき"
 
+    def test_non_lite_model_includes_penalty(self, monkeypatch):
+        """非 lite モデルではペナルティパラメータが含まれる"""
+        from services.gemini_client import GeminiClient
+
+        captured = {}
+
+        def fake_post(url, params=None, json=None, **kwargs):
+            captured["payload"] = json
+            return make_response(
+                200,
+                json_data={"candidates": [{"content": {"parts": [{"text": "ok"}]}}]},
+            )
+
+        client = GeminiClient(
+            api_key="k",
+            model="gemini-2.5-flash",
+            session=types.SimpleNamespace(post=fake_post),
+        )
+        monkeypatch.setattr("time.sleep", lambda s: None)
+        client.summarize_audio(b"123", "prompt")
+
+        cfg = captured["payload"]["generationConfig"]
+        assert "frequencyPenalty" in cfg, "非 lite モデルには frequencyPenalty が必要"
+        assert "presencePenalty" in cfg, "非 lite モデルには presencePenalty が必要"
+
+    def test_lite_model_excludes_penalty(self, monkeypatch):
+        """lite モデルではペナルティパラメータが除外される"""
+        from services.gemini_client import GeminiClient
+
+        captured = {}
+
+        def fake_post(url, params=None, json=None, **kwargs):
+            captured["payload"] = json
+            return make_response(
+                200,
+                json_data={"candidates": [{"content": {"parts": [{"text": "ok"}]}}]},
+            )
+
+        client = GeminiClient(
+            api_key="k",
+            model="gemini-2.5-flash-lite",
+            session=types.SimpleNamespace(post=fake_post),
+        )
+        monkeypatch.setattr("time.sleep", lambda s: None)
+        client.summarize_audio(b"123", "prompt")
+
+        cfg = captured["payload"]["generationConfig"]
+        assert "frequencyPenalty" not in cfg, "lite モデルに frequencyPenalty は不要"
+        assert "presencePenalty" not in cfg, "lite モデルに presencePenalty は不要"
+        # 共通パラメータは含まれるべき
+        assert "temperature" in cfg
+        assert "topP" in cfg
+        assert "maxOutputTokens" in cfg
+
 
 # ========== finishReason 関連 ==========
 class TestFinishReason:
