@@ -1,4 +1,4 @@
-# AGENTS.md
+# CLAUDE.md
 
 ## Core Rule
 
@@ -21,20 +21,12 @@ Small, clear, safe steps—grounded in real docs. TDD: red→green→refactor.
 - Use MCP tools; transports: stdio and Streamable HTTP/SSE; bridge remote via mcp-remote/proxy.
 - Each tool exposes a clear JSON schema; unsafe ops require HITL.
 
-## Structured Outputs
-
-- Plans/PRs/tasks/test summaries must exactly match a JSON Schema; re-ask on validation failure.
-
 ## Knowledge & Libraries
 
 - Fetch and cite official docs before tests/code (e.g., context7 for library docs).
 - Call resolve-library-id, then get-library-docs to verify APIs.
 - If uncertain, pause and request clarification.
-- Project-specific info: see **@README.md**, **@docs/** directory.
-
-## ExecPlans
-
-- When writing complex features or significant refactors, use an ExecPlan (as described in **.agent/PLANS.md**) from design to implementation.
+- Project-specific info: see @README.md, @docs/ directory.
 
 ## Workflow
 

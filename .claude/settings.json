@@ -1,0 +1,157 @@
+{
+  "cleanupPeriodDays": 30,
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+    "BASH_DEFAULT_TIMEOUT_MS": "300000",
+    "BASH_MAX_TIMEOUT_MS": "1200000",
+    "MAX_THINKING_TOKENS": "60000"
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "network": {
+      "allowLocalBinding": true
+    }
+  },
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Grep(**)",
+      "Glob(**)",
+      "LS(**)",
+      "WebFetch(domain:*)",
+      "WebSearch",
+      "NotebookRead(**)",
+      "TodoRead(**)",
+      "TodoWrite(**)",
+      "Task(**)",
+      "Edit(./**)",
+      "Write(./**)",
+      "MultiEdit(./**)",
+      "NotebookEdit(./**)",
+      "Bash(npm run:*)",
+      "Bash(npm test:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npm run build:*)",
+      "Bash(npx:*)",
+      "Bash(pnpm run:*)",
+      "Bash(yarn run:*)",
+      "Bash(bun run:*)",
+      "Bash(deno task:*)",
+      "Bash(deno test:*)",
+      "Bash(deno fmt:*)",
+      "Bash(deno lint:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(go build:*)",
+      "Bash(go test:*)",
+      "Bash(go fmt:*)",
+      "Bash(pytest:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(ruff:*)",
+      "Bash(mypy:*)",
+      "Bash(uv run:*)",
+      "Bash(uv sync:*)",
+      "Bash(make:*)",
+      "Bash(just:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git branch:*)",
+      "Bash(git show:*)",
+      "Bash(git stash:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(gh issue:*)",
+      "Bash(gh pr:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(wc:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(fd:*)",
+      "Bash(tree:*)",
+      "Bash(echo:*)",
+      "Bash(which:*)",
+      "Bash(pwd)",
+      "Bash(env)",
+      "Bash(date:*)",
+      "Bash(whoami)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -rf /*)",
+      "Bash(sudo:*)",
+      "Bash(dd:*)",
+      "Bash(mkfs:*)",
+      "Bash(> /dev/*)",
+      "Bash(curl * | sh)",
+      "Bash(curl * | bash)",
+      "Bash(wget * | sh)",
+      "Bash(wget * | bash)",
+      "Bash(git push:*)",
+      "Bash(git push)",
+      "Bash(git checkout main)",
+      "Bash(git switch main)",
+      "Bash(git merge * main)",
+      "Bash(git rebase main)",
+      "Bash(git reset --hard:*)",
+      "Bash(git filter-branch:*)",
+      "Bash(git filter-repo:*)",
+      "Bash(rm -rf .git)",
+      "Bash(npm publish:*)",
+      "Bash(cargo publish:*)",
+      "Bash(docker system prune -af)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./secrets/**)",
+      "Read(./**/*secret*)",
+      "Read(./**/*credential*)",
+      "Edit(/etc/**)",
+      "Edit(/usr/**)",
+      "Edit(~/.ssh/id_*)",
+      "Edit(~/.ssh/*_rsa)",
+      "Edit(~/.ssh/*_ed25519)",
+      "Write(/etc/**)",
+      "Write(/usr/**)",
+      "Write(~/.ssh/**)",
+      "Write(.env*)",
+      "Write(**/secrets/**)",
+      "mcp__supabase__execute_sql"
+    ],
+    "defaultMode": "plan"
+  },
+  "model": "opus",
+  "preferredNotifChannel": "terminal_bell",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "case \"$CLAUDE_FILE_PATHS\" in *.ts|*.tsx|*.js|*.jsx|*.json) bunx biome format --write \"$CLAUDE_FILE_PATHS\" 2>/dev/null || true ;; *.py) ruff format \"$CLAUDE_FILE_PATHS\" 2>/dev/null || true ;; esac"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "afplay /System/Library/Sounds/Funk.aiff"
+          }
+        ]
+      }
+    ]
+  }
+}
