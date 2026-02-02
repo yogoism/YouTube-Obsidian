@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """YouTube RSS → Gemini 2.5 Flash → Markdown."""
 
-import os, re, json, time, pathlib, subprocess, tempfile, calendar
-import feedparser, requests, yaml
-from datetime import datetime, timezone, UTC
+import calendar
+import json
+import os
+import pathlib
+import re
+import subprocess
+import tempfile
+import time
+from datetime import datetime, UTC
+from urllib.parse import urlparse
+
+import feedparser
+import requests
+import yaml
 from dotenv import load_dotenv
 from services.gemini_client import GeminiClient
 from prompts import PROMPT_TMPL
@@ -45,10 +56,11 @@ def notify(msg: str, title: str = "YouTube & Podcast Bot") -> None:
             pass
 
     try:
-        import subprocess, shlex
-
+        # AppleScript インジェクション防止: " と \ をエスケープ
+        safe_msg = msg.replace("\\", "\\\\").replace('"', '\\"')
+        safe_title = title.replace("\\", "\\\\").replace('"', '\\"')
         subprocess.run(
-            ["osascript", "-e", f'display notification "{msg}" with title "{title}"']
+            ["osascript", "-e", f'display notification "{safe_msg}" with title "{safe_title}"']
         )
     except Exception:
         print(f"[NOTIFY] {title}: {msg}")
@@ -66,8 +78,14 @@ def get_gemini_client() -> GeminiClient:
 
 # ========== ユーティリティ ==========
 def sanitize_filename(text: str, max_len: int = 80) -> str:
-    """ファイル名に使えない文字を削除 & 長さ制限"""
-    return re.sub(r'[\\/*?:"<>|]', "", text)[:max_len]
+    """ファイル名に使えない文字を削除 & 長さ制限。パストラバーサル防止。"""
+    sanitized = re.sub(r'[\\/*?:"<>|]', "", text)
+    # パストラバーサル防止: .. を除去し最終パスコンポーネントのみ取得
+    sanitized = sanitized.replace("..", "")
+    sanitized = pathlib.PurePosixPath(sanitized).name if sanitized else "_"
+    if not sanitized or sanitized in (".", ".."):
+        sanitized = "_"
+    return sanitized[:max_len]
 
 
 
@@ -140,8 +158,8 @@ def yt_is_video(meta: dict) -> bool:
 def is_podcast(entry) -> bool:
     """enclosure で audio/* を持つかどうか"""
     return any(
-        l.get("rel") == "enclosure" or l.get("type", "").startswith("audio/")
-        for l in entry.get("links", [])
+        link.get("rel") == "enclosure" or link.get("type", "").startswith("audio/")
+        for link in entry.get("links", [])
     )
 
 
@@ -152,7 +170,7 @@ def fetch_enclosure(entry, dest: pathlib.Path):
     def _href(it):
         return it.get("href") if isinstance(it, dict) else getattr(it, "href", None)
 
-    enc = next(l for l in entry.links if _rel(l) == "enclosure")
+    enc = next(link for link in entry.links if _rel(link) == "enclosure")
     href = _href(enc)
 
     last_err = None
@@ -188,11 +206,15 @@ def process_youtube(entry):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         mp3_path = pathlib.Path(tmpdir) / f"{vid}.mp3"
-        subprocess.run(
-            ["yt-dlp", "-x", "--audio-format", "mp3", "-o", str(mp3_path), url],
-            check=True,
-            timeout=YTDLP_TIMEOUT,
-        )
+        try:
+            subprocess.run(
+                ["yt-dlp", "-x", "--audio-format", "mp3", "-o", str(mp3_path), url],
+                check=True,
+                timeout=YTDLP_TIMEOUT,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            print(f"   - yt-dlp ダウンロード失敗 {vid}: {exc}")
+            return
         md = get_gemini_client().summarize_audio(mp3_path.read_bytes(), prompt)
 
     if md is None:
@@ -243,6 +265,11 @@ def crawl():
 
     for feed_url in feeds:
         if not feed_url.strip():
+            continue
+        # スキーム検証: http/https のみ許可（file:// 等によるローカルファイル読み取り防止）
+        scheme = urlparse(feed_url.strip()).scheme.lower()
+        if scheme not in ("http", "https"):
+            print(f"   - SKIP 不正なスキーム: {feed_url}")
             continue
         print(f"● {feed_url}")
         parsed = feedparser.parse(feed_url.strip())
