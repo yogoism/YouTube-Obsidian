@@ -35,7 +35,8 @@ WINDOW_HOURS = 24  # 直近何時間を見るか
 DEBUG_GEMINI = os.getenv("GEMINI_DEBUG", "0") == "1"  # デバッグ時のみ詳細を出す
 YTDLP_TIMEOUT = int(os.getenv("YTDLP_TIMEOUT", "900"))  # ハング防止のための上限秒数
 POD_TIMEOUT = int(os.getenv("POD_TIMEOUT", "600"))  # Podcastダウンロードのタイムアウト
-POD_RETRIES = int(os.getenv("POD_RETRIES", "3"))  # Podcastダウンロードのリトライ回数
+POD_RETRIES = max(1, int(os.getenv("POD_RETRIES", "3")))  # Podcastダウンロードのリトライ回数（最低1回）
+YTDLP_RETRIES = max(1, int(os.getenv("YTDLP_RETRIES", "3")))  # yt-dlpダウンロードのリトライ回数（最低1回）
 _gemini_client: GeminiClient | None = None
 
 # ---------- 通知 ----------
@@ -190,15 +191,17 @@ def fetch_enclosure(entry, dest: pathlib.Path):
 
 
 # ========== 処理ルーチン ==========
-def process_youtube(entry):
+def process_youtube(entry) -> bool:
+    """YouTube エントリを処理。成功=True、失敗/スキップ=False"""
     vid = entry.yt_videoid
     url = f"https://youtu.be/{vid}"
     ymeta = yt_meta(url)
     if ymeta is None:
-        return
+        print(f"   - SKIP メタデータ取得失敗 {vid}")
+        return False
     if not yt_is_video(ymeta):
         print(f"   - SKIP non-video {vid}")
-        return
+        return False
 
     channel_name = ymeta.get("uploader") or "unknown"
 
@@ -206,29 +209,41 @@ def process_youtube(entry):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         mp3_path = pathlib.Path(tmpdir) / f"{vid}.mp3"
-        try:
-            subprocess.run(
-                ["yt-dlp", "-x", "--audio-format", "mp3", "-o", str(mp3_path), url],
-                check=True,
-                timeout=YTDLP_TIMEOUT,
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            print(f"   - yt-dlp ダウンロード失敗 {vid}: {exc}")
-            return
+        last_err = None
+        for attempt in range(1, YTDLP_RETRIES + 1):
+            try:
+                subprocess.run(
+                    ["yt-dlp", "-x", "--audio-format", "mp3", "-o", str(mp3_path), url],
+                    check=True,
+                    timeout=YTDLP_TIMEOUT,
+                )
+                last_err = None
+                break
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                last_err = exc
+                if attempt >= YTDLP_RETRIES:
+                    break
+                time.sleep(2 ** (attempt - 1))
+        if last_err is not None:
+            print(f"   - yt-dlp ダウンロード失敗 {vid}: {last_err}")
+            return False
         md = get_gemini_client().summarize_audio(mp3_path.read_bytes(), prompt)
 
     if md is None:
         print(f"   - SKIP Gemini で本文なし {entry.title}")
-        return
+        notify(f"要約失敗: {entry.title}")
+        return False
 
     author = sanitize_filename(getattr(entry, "author", "unknown"), 40)
     fname = f"{entry.pub_dash}_{sanitize_filename(entry.title)}_{author}.md"
     (OUT_YT / fname).write_text(md, encoding="utf-8")
     print(f" ✔ YT  {entry.title}")
     notify(f"YouTube: {entry.title}")
+    return True
 
 
-def process_podcast(entry):
+def process_podcast(entry) -> bool:
+    """Podcast エントリを処理。成功=True、失敗/スキップ=False"""
     channel_name = (
         getattr(entry, "author", "") or getattr(entry, "itunes_author", "") or "unknown"
     )
@@ -239,12 +254,17 @@ def process_podcast(entry):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         mp3_path = pathlib.Path(tmpdir) / "podcast.mp3"
-        fetch_enclosure(entry, mp3_path)  # ← ここで進捗バーを表示
+        try:
+            fetch_enclosure(entry, mp3_path)
+        except Exception as e:
+            print(f"   - Podcast ダウンロード失敗 {entry.title}: {e}")
+            return False
         md = get_gemini_client().summarize_audio(mp3_path.read_bytes(), prompt)
 
     if md is None:
         print(f"   - SKIP Gemini で本文なし {entry.title}")
-        return
+        notify(f"要約失敗: {entry.title}")
+        return False
 
     author = sanitize_filename(
         getattr(entry, "author", getattr(entry, "itunes_author", "unknown")), 40
@@ -252,8 +272,9 @@ def process_podcast(entry):
     fname = f"{entry.pub_dash}_{sanitize_filename(entry.title)}_{author}.md"
     (OUT_POD / fname).write_text(md, encoding="utf-8")
 
-    print(f" ✔ Pod  {entry.title}")  # YouTube と同じ形式
+    print(f" ✔ Pod  {entry.title}")
     notify(f"Podcast: {entry.title}")
+    return True
 
 
 # ========== クロール ==========
@@ -262,6 +283,7 @@ def crawl():
     feeds_raw = yaml.safe_load(pathlib.Path("feeds.yaml").read_text()) or []
     feeds = [f.strip() for f in feeds_raw if isinstance(f, str) and f.strip()]
     now_utc = datetime.now(UTC)
+    stats = {"found": 0, "ok": 0, "skip": 0}
 
     for feed_url in feeds:
         if not feed_url.strip():
@@ -273,6 +295,14 @@ def crawl():
             continue
         print(f"● {feed_url}")
         parsed = feedparser.parse(feed_url.strip())
+
+        # フィードパース失敗の検知
+        if getattr(parsed, "status", 200) >= 400:
+            print(f"   - SKIP HTTP {parsed.status}: {feed_url}")
+            continue
+        if getattr(parsed, "bozo", False):
+            print(f"   - 警告: フィードパースエラー（bozo）: {feed_url}")
+
         for e in parsed.entries:
             ts_tuple = getattr(e, "published_parsed", None) or getattr(
                 e, "updated_parsed", None
@@ -291,14 +321,33 @@ def crawl():
             e.pub_dash = pub_dt.strftime("%Y-%m-%d")  # 例 2025-05-31 （ファイル名用）
             e.pub_slash = pub_dt.strftime("%Y/%m/%d")  # 例 2025/05/31 （YAML 用）
 
-            if hasattr(e, "yt_videoid"):
-                process_youtube(e)
-            elif is_podcast(e):
-                process_podcast(e)
+            stats["found"] += 1
+
+            try:
+                if hasattr(e, "yt_videoid"):
+                    ok = process_youtube(e)
+                elif is_podcast(e):
+                    ok = process_podcast(e)
+                else:
+                    print(f"   - SKIP unknown type: {e.title}")
+                    ok = False
+            except Exception as exc:
+                print(f"   - ERROR {getattr(e, 'title', '?')}: {exc}")
+                ok = False
+
+            if ok:
+                stats["ok"] += 1
             else:
-                print(f"   - SKIP unknown type: {e.title}")
+                stats["skip"] += 1
 
             time.sleep(3)  # API レート制限対策
+
+    summary = (
+        f"処理完了: 検出 {stats['found']}件 / "
+        f"成功 {stats['ok']}件 / スキップ {stats['skip']}件"
+    )
+    print(summary)
+    notify(summary)
 
 
 if __name__ == "__main__":
